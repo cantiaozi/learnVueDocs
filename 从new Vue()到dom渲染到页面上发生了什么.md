@@ -1,4 +1,33 @@
-## 一.new Vue()发生了什么
+## 从new Vue()到dom渲染到页面上发生了什么
+
+```JavaScript
+new Vue({
+  render(h) {
+    return h('div', {
+      attrs: {
+        id: 'app1'
+      }
+    }, 
+      [
+        this.msg,
+        [h('div', {attrs: {id: 'app2'}}, [h('div', {attrs: {id: 'app3'}}, 'gg')]), 'tt']
+      ]
+    )
+  },
+  el: '#app',
+  data: {
+    msg: 'hello world'
+  }
+})
+```
+
+上面的代码最总会在页面上渲染成下面的内容。
+
+![](E:\开发文档\新建文件夹\learnVueDocs\others\页面渲染.png)
+
+那么这其中发生了什么呢？vue做的事情主要如下。
+
+### 1.1 Vue构造方法
 
 Vue函数定义在src\core\instance目录下的index.js文件中。
 
@@ -76,7 +105,7 @@ Vue.prototype._init = function (options?: Object) {
 
 _init方法中进行了一些列初始化操作，将vue实例的配置放到实例的$options属性上。这里我们重点分析3个地方，initProxy(vm)、initState(vm)和$mount页面挂载方法。
 
-### 1.1 initProxy(vm)
+### 1.2 initProxy(vm)
 
 当我们在vue的template模板中使用了一个未定义的变量时，会报错提示。这是因为做了Proxy代理，当访问vue实例上的相应属性时，会通过这层代理。
 
@@ -126,7 +155,7 @@ const warnNonPresent = (target, key) => {
 }
 ```
 
-### 1.2 initState(vm)
+### 1.3 initState(vm)
 
 我们在vue的某些生命周期中可以通过this.xxx的方式来访问data、props和methods中的属性。这是通过代理来实现的。initState函数的代码如下：
 
@@ -216,7 +245,7 @@ export function proxy (target: Object, sourceKey: string, key: string) {
 
 proxy传入的第二个参数是'_data'，当访问或者设置组件实例上的属性时，会去访问或者设置组件实例__data属性上的相应属性。
 
-### 1.3 $mount方法
+### 1.4 $mount方法
 
 ```JavaScript
 Vue.prototype.$mount = function (
@@ -411,7 +440,7 @@ export default class Watcher {
 }
 ```
 
-### 1.4 _render方法
+### 1.5 _render方法
 
 上面的updateComponent方法中调用了vue实例上的_render方法。 _render方法是在src\core\instance目录下的index.js文件中的renderMixin中定义的（详情请看1.1）。
 
@@ -422,7 +451,7 @@ Vue.prototype._render = function (): VNode {
 
     .....
 	//执行vm.$options中的render函数，传入两个参数
-    //第一个参数vm._renderProxy是一个Proxy对象，详情查看1.1
+    //第一个参数vm._renderProxy是一个Proxy对象，详情查看1.2
     //vm.$createElement方法定义在initRender函数中
     //initRender函数在_init方法中被执行了
     let vnode
@@ -462,13 +491,15 @@ render(h) {
 },
 ```
 
-1.4 createElement方法
+
+
+
 
 ```JavaScript
 vm.$createElement = (a, b, c, d) => createElement(vm, a, b, c, d, true)
 ```
 
-$createElement方法中执行createElement方法。
+$createElement方法中执行createElement方法。createElement方法返回的是vnode，即虚拟dom。
 
 ```JavaScript
 const SIMPLE_NORMALIZE = 1
@@ -550,7 +581,27 @@ export function _createElement (
 
 
 
-normalizeChildren方法如下，当children为基本数据类型时，创建一个文本节点并返回。当children是一个数组时，调用normalizeArrayChildren方法。
+normalizeChildren方法如下，当children为基本数据类型时，创建一个文本节点并返回。当children是一个数组时，调用normalizeArrayChildren方法。当是其它类型时，就直接返回undefined了，例如下面这种情况，id为'app1'的div的子节点是一个vnode，结果normalizeChildren直接返回了undefined，体现在页面上就是页面为空，不会展示'gg'字段。解决手段就是将其包装成一个数组。
+
+```JavaScript
+new Vue({
+  render(h) {
+    return h('div', {
+      attrs: {
+        id: 'app1'
+      }
+    }, 
+      h('div', {attrs: {id: 'app3'}}, 'gg')
+    )
+  },
+  el: '#app',
+  data: {
+    msg: 'hello world'
+  }
+})
+```
+
+
 
 ```javascript 
 export function normalizeChildren (children: any): ?Array<VNode> {
@@ -614,7 +665,7 @@ normalizeArrayChildren方法中对children数组进行for循环处理，结果�
 
 回到_createElement方法，再将children转换为vnode数组后，剩下的逻辑主要是判断tag，如果tag是一个表示普通dom节点的字符串，直接调用VNode构造函数生成vnode对象；如果tag是一个表示vue组件的字符串，则调用createComponent方法生成vnode对象。最后返回vnode对象。createComponent方法不在本文讨论范围内。
 
-### 1.5 _update
+### 1.6 _update
 
 ```javascript
 Vue.prototype._update = function (vnode: VNode, hydrating?: boolean) {
@@ -624,8 +675,6 @@ Vue.prototype._update = function (vnode: VNode, hydrating?: boolean) {
     const prevActiveInstance = activeInstance
     activeInstance = vm
     vm._vnode = vnode
-    // Vue.prototype.__patch__ is injected in entry points
-    // based on the rendering backend used.
     if (!prevVnode) {
       // initial render
       vm.$el = vm.__patch__(vm.$el, vnode, hydrating, false /* removeOnly */)
@@ -634,19 +683,15 @@ Vue.prototype._update = function (vnode: VNode, hydrating?: boolean) {
       vm.$el = vm.__patch__(prevVnode, vnode)
     }
     activeInstance = prevActiveInstance
-    // update __vue__ reference
     if (prevEl) {
       prevEl.__vue__ = null
     }
     if (vm.$el) {
       vm.$el.__vue__ = vm
     }
-    // if parent is an HOC, update its $el as well
     if (vm.$vnode && vm.$parent && vm.$vnode === vm.$parent._vnode) {
       vm.$parent.$el = vm.$el
     }
-    // updated hook is called by the scheduler to ensure that children are
-    // updated in a parent's updated hook.
   }
 ```
 
@@ -656,7 +701,7 @@ _update方法的调用时间有两点：一是初始化页面渲染的时候会�
 export const patch: Function = createPatchFunction({ nodeOps, modules })
 ```
 
-patch方法是调用createPatchFunction返回的函数，nodeOps是一个对象，封装了对于真实dom元素的各种操作，modules中封装了对于dom元素属性、类、样式属性、事件等的操作方法。createPatchFunction函数最后返回了一个名为patch的函数。
+patch方法是调用createPatchFunction返回的函数，nodeOps是一个对象，封装了对于真实dom元素的各种操作，modules中封装了对于dom元素属性、类、样式属性、事件等的操作方法。createPatchFunction函数最后返回了一个名为patch的函数。patch函数执行时，传递的四个参数中，oldVnode是真实的dom对象，vnode是虚拟dom对象，hydrating和removeOnly都是false。其中会执行createElm方法将vnode转换为真实dom并插入到页面上，然后删除原来的dom节点。
 
 ```javascript
 return function patch (oldVnode, vnode, hydrating, removeOnly) {
@@ -667,9 +712,9 @@ return function patch (oldVnode, vnode, hydrating, removeOnly) {
     if (isUndef(oldVnode)) {
       ......
     } else {
+      //oldVnode是真实dom对象，oldVnode.nodeType存在
       const isRealElement = isDef(oldVnode.nodeType)
       if (!isRealElement && sameVnode(oldVnode, vnode)) {
-        // patch existing root node
         patchVnode(oldVnode, vnode, insertedVnodeQueue, removeOnly)
       } else {
         if (isRealElement) {
@@ -678,52 +723,20 @@ return function patch (oldVnode, vnode, hydrating, removeOnly) {
           oldVnode = emptyNodeAt(oldVnode)
         }
 
-        // replacing existing element
+        // 虚拟dom的elm属性是其表示的真实的dom对象
         const oldElm = oldVnode.elm
+        //找到真实dom对象的父节点
         const parentElm = nodeOps.parentNode(oldElm)
 
-        // create new node
+        // 执行createElm方法将vnode转换为真实dom并插入到页面上。
         createElm(
           vnode,
           insertedVnodeQueue,
-          // extremely rare edge case: do not insert if old element is in a
-          // leaving transition. Only happens when combining transition +
-          // keep-alive + HOCs. (#4590)
           oldElm._leaveCb ? null : parentElm,
           nodeOps.nextSibling(oldElm)
         )
 
-        // update parent placeholder node element, recursively
-        if (isDef(vnode.parent)) {
-          let ancestor = vnode.parent
-          const patchable = isPatchable(vnode)
-          while (ancestor) {
-            for (let i = 0; i < cbs.destroy.length; ++i) {
-              cbs.destroy[i](ancestor)
-            }
-            ancestor.elm = vnode.elm
-            if (patchable) {
-              for (let i = 0; i < cbs.create.length; ++i) {
-                cbs.create[i](emptyNode, ancestor)
-              }
-              // #6513
-              // invoke insert hooks that may have been merged by create hooks.
-              // e.g. for directives that uses the "inserted" hook.
-              const insert = ancestor.data.hook.insert
-              if (insert.merged) {
-                // start at index 1 to avoid re-invoking component mounted hook
-                for (let i = 1; i < insert.fns.length; i++) {
-                  insert.fns[i]()
-                }
-              }
-            } else {
-              registerRef(ancestor)
-            }
-            ancestor = ancestor.parent
-          }
-        }
-
-        // destroy old node
+        // 删除原来的dom节点，即id为app的节点
         if (isDef(parentElm)) {
           removeVnodes(parentElm, [oldVnode], 0, 0)
         } else if (isDef(oldVnode.tag)) {
@@ -737,7 +750,69 @@ return function patch (oldVnode, vnode, hydrating, removeOnly) {
   }
 ```
 
+createElm方法如下，在函数执行过程中，首先会生成真实的dom元素，此时不会立即插入到页面上。然后会调用createChildren方法将子节点转换为真实dom并插入到父节点上，createChildren方法的逻辑比较简单，判断子节点的类型，如果是一个数组，就递归调用createElm，将子节点转换为真实dom并且插入到父节点中，如果是一个基础类型数据，则直接生成一个文本节点插入到父节点中。最后在调用insert方法将父节点插入到页面上。因此节点插入的顺序是先子后父。
 
+```javascript
+function createElm (
+    vnode,
+    insertedVnodeQueue,
+    parentElm,
+    refElm,
+    nested,
+    ownerArray,
+    index
+  ) {
+
+    const data = vnode.data
+    const children = vnode.children
+    const tag = vnode.tag
+    if (isDef(tag)) {
+      //生成真实的dom对象，并且赋给vnode的elm属性
+      vnode.elm = vnode.ns
+        ? nodeOps.createElementNS(vnode.ns, tag)
+        : nodeOps.createElement(tag, vnode)
+      
+      if (__WEEX__) {
+        ......
+      } else {
+        //将子节点插入到vnode节点的真实dom节点上
+        createChildren(vnode, children, insertedVnodeQueue)
+        if (isDef(data)) {
+          invokeCreateHooks(vnode, insertedVnodeQueue)
+        }
+        //将父节点的真实dom插入到页面上
+        insert(parentElm, vnode.elm, refElm)
+      }
+
+      if (process.env.NODE_ENV !== 'production' && data && data.pre) {
+        creatingElmInVPre--
+      }
+    } else if (isTrue(vnode.isComment)) {
+      vnode.elm = nodeOps.createComment(vnode.text)
+      insert(parentElm, vnode.elm, refElm)
+    } else {
+      vnode.elm = nodeOps.createTextNode(vnode.text)
+      insert(parentElm, vnode.elm, refElm)
+    }
+}
+        
+function createChildren (vnode, children, insertedVnodeQueue) {
+    if (Array.isArray(children)) {
+      ......
+      for (let i = 0; i < children.length; ++i) {
+        createElm(children[i], insertedVnodeQueue, vnode.elm, null, true, children, i)
+      }
+    } else if (isPrimitive(vnode.text)) {
+      nodeOps.appendChild(vnode.elm, nodeOps.createTextNode(String(vnode.text)))
+    }
+  }
+```
+
+### 1.7 总结
+
+用一张流程图总结
+
+![](E:\开发文档\新建文件夹\learnVueDocs\others\newVue到页面渲染的主要流程图.png)
 
 ## 一、可复用的方法
 
