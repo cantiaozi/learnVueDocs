@@ -37,63 +37,98 @@ Vue.prototype._update = function (vnode: VNode, hydrating?: boolean) {
 
 ```JavaScript
 function patch (oldVnode, vnode, hydrating, removeOnly) {
-    if (sameVnode(oldVnode, vnode)) {
-      // patch existing root node
-      patchVnode(oldVnode, vnode, insertedVnodeQueue, removeOnly)
+    ......
+
+    let isInitialPatch = false
+    const insertedVnodeQueue = []
+
+    if (isUndef(oldVnode)) {
+      // empty mount (likely as component), create new root element
+      isInitialPatch = true
+      createElm(vnode, insertedVnodeQueue)
     } else {
+      //nodeType只有原生真实的dom对象才有
+      //这里oldVnode是虚拟dom，因此不存在
+      const isRealElement = isDef(oldVnode.nodeType)
+      if (!isRealElement && sameVnode(oldVnode, vnode)) {
+        // patch existing root node
+        patchVnode(oldVnode, vnode, insertedVnodeQueue, removeOnly)
+      } else {
+		......
+        // replacing existing element
+        const oldElm = oldVnode.elm
+        const parentElm = nodeOps.parentNode(oldElm)
+		
+        // 创建新的节点
+        // create new node
+        createElm(
+          vnode,
+          insertedVnodeQueue,
+          // extremely rare edge case: do not insert if old element is in a
+          // leaving transition. Only happens when combining transition +
+          // keep-alive + HOCs. (#4590)
+          oldElm._leaveCb ? null : parentElm,
+          nodeOps.nextSibling(oldElm)
+        )
 
-      // replacing existing element
-      const oldElm = oldVnode.elm
-      const parentElm = nodeOps.parentNode(oldElm)
-
-      // 创建新的节点
-      createElm(
-        vnode,
-        insertedVnodeQueue,
-        // extremely rare edge case: do not insert if old element is in a
-        // leaving transition. Only happens when combining transition +
-        // keep-alive + HOCs. (#4590)
-        oldElm._leaveCb ? null : parentElm,
-        nodeOps.nextSibling(oldElm)
-      )
-
-      // 更新父的占位符节点
-      if (isDef(vnode.parent)) {
-        let ancestor = vnode.parent
-        const patchable = isPatchable(vnode)
-        while (ancestor) {
-          for (let i = 0; i < cbs.destroy.length; ++i) {
-            cbs.destroy[i](ancestor)
-          }
-          ancestor.elm = vnode.elm
-          if (patchable) {
-            for (let i = 0; i < cbs.create.length; ++i) {
-              cbs.create[i](emptyNode, ancestor)
+        // update parent placeholder node element, recursively
+        // 更新父的占位符节点
+        //vnode是渲染vnode，它的parent是占位符vnode
+        if (isDef(vnode.parent)) {
+          let ancestor = vnode.parent
+          //判断vnode是否是可以挂载的
+          const patchable = isPatchable(vnode)
+          while (ancestor) {
+            //执行一些钩子函数
+            for (let i = 0; i < cbs.destroy.length; ++i) {
+              cbs.destroy[i](ancestor)
             }
-            // #6513
-            // invoke insert hooks that may have been merged by create hooks.
-            // e.g. for directives that uses the "inserted" hook.
-            const insert = ancestor.data.hook.insert
-            if (insert.merged) {
-              // start at index 1 to avoid re-invoking component mounted hook
-              for (let i = 1; i < insert.fns.length; i++) {
-                insert.fns[i]()
+            ancestor.elm = vnode.elm
+            if (patchable) {
+              for (let i = 0; i < cbs.create.length; ++i) {
+                cbs.create[i](emptyNode, ancestor)
               }
+              // #6513
+              // invoke insert hooks that may have been merged by create hooks.
+              // e.g. for directives that uses the "inserted" hook.
+              const insert = ancestor.data.hook.insert
+              if (insert.merged) {
+                // start at index 1 to avoid re-invoking component mounted hook
+                for (let i = 1; i < insert.fns.length; i++) {
+                  insert.fns[i]()
+                }
+              }
+            } else {
+              registerRef(ancestor)
             }
-          } else {
-            registerRef(ancestor)
+            ancestor = ancestor.parent
           }
-          ancestor = ancestor.parent
+        }
+
+        // destroy old node
+        // 删除老的节点
+        if (isDef(parentElm)) {
+          removeVnodes(parentElm, [oldVnode], 0, 0)
+        } else if (isDef(oldVnode.tag)) {
+          invokeDestroyHook(oldVnode)
         }
       }
-
-      // 删除老的节点
-      if (isDef(parentElm)) {
-        removeVnodes(parentElm, [oldVnode], 0, 0)
-      } else if (isDef(oldVnode.tag)) {
-        invokeDestroyHook(oldVnode)
-      }
     }
+
+    invokeInsertHook(vnode, insertedVnodeQueue, isInitialPatch)
+    return vnode.elm
+  }
+```
+
+```JavaScript
+function isPatchable (vnode) {
+    //vnode的componentInstance属性若存在的话，说明是一个占位符vnode
+    //上面调用该方法时，传入的是一个渲染vnode，说明这个vnode即是渲染vnode，也是占位符vnode
+    //循环拿到可挂载的渲染vnode
+    while (vnode.componentInstance) {
+      vnode = vnode.componentInstance._vnode
+    }
+    return isDef(vnode.tag)
 }
 ```
 
@@ -122,7 +157,9 @@ function sameVnode (a, b) {
 
 #### 新旧节点不是sameVnode的
 
-如果新旧 `vnode` 不是sameVnode的，那么更新的逻辑非常简单，它本质上是要替换已存在的节点，大致分为 3 步：1.创建新的节点；2.更新父的占位符节点；3.删除旧的节点。
+如果新旧 `vnode` 不是sameVnode的，那么更新的逻辑非常简单，它本质上是要替换已存在的节点，大致分为 3 步：1.创建新的节点；2.更新父的占位符节点，将父的占位符节点的elm属性赋值为vnode渲染vnode的elm，即上一步创建的真实dom对象；3.删除旧的节点。
+
+
 
 #### 新旧节点是sameVnode的
 
@@ -135,35 +172,207 @@ function sameVnode (a, b) {
 patchVnode方法的主要操作逻辑如下：
 
 ```javascript
-const oldCh = oldVnode.children
-const ch = vnode.children
-if (isUndef(vnode.text)) {
-  if (isDef(oldCh) && isDef(ch)) {
-    if (oldCh !== ch) updateChildren(elm, oldCh, ch, insertedVnodeQueue, removeOnly)
-  } else if (isDef(ch)) {
-    if (isDef(oldVnode.text)) nodeOps.setTextContent(elm, '')
-    addVnodes(elm, null, ch, 0, ch.length - 1, insertedVnodeQueue)
-  } else if (isDef(oldCh)) {
-    removeVnodes(elm, oldCh, 0, oldCh.length - 1)
-  } else if (isDef(oldVnode.text)) {
-    nodeOps.setTextContent(elm, '')
+function patchVnode (oldVnode, vnode, insertedVnodeQueue, removeOnly) {
+    if (oldVnode === vnode) {
+      return
+    }
+	//将原来的渲染dom对应的实际dom赋给vnode的elm属性
+    const elm = vnode.elm = oldVnode.elm
+
+    ......
+
+    let i
+    const data = vnode.data
+    //如果vnode是一个组件的vnode（即占位符vnode），那么它的data属性上有hook
+    //如果hook中有prepatch这个钩子的话，就会执行
+    //该钩子中会执行updateChildComponent方法，该方法对子组件进行更新
+    //updateChildren方法中，会对子的vnode 执行patchVnode方法，如果某个子的vnode是一个组件的vnode
+    //即占位符vnode，那么就会执行prepatch钩子，占位符vnode的children不存在，因此不需要去
+    //执行子组件的更新
+    if (isDef(data) && isDef(i = data.hook) && isDef(i = i.prepatch)) {
+      i(oldVnode, vnode)
+    }
+
+    const oldCh = oldVnode.children
+    const ch = vnode.children
+    //执行一些钩子函数
+    if (isDef(data) && isPatchable(vnode)) {
+      for (i = 0; i < cbs.update.length; ++i) cbs.update[i](oldVnode, vnode)
+      if (isDef(i = data.hook) && isDef(i = i.update)) i(oldVnode, vnode)
+    }
+    if (isUndef(vnode.text)) {
+      if (isDef(oldCh) && isDef(ch)) {
+        if (oldCh !== ch) updateChildren(elm, oldCh, ch, insertedVnodeQueue, removeOnly)
+      } else if (isDef(ch)) {
+        if (isDef(oldVnode.text)) nodeOps.setTextContent(elm, '')
+        addVnodes(elm, null, ch, 0, ch.length - 1, insertedVnodeQueue)
+      } else if (isDef(oldCh)) {
+        removeVnodes(elm, oldCh, 0, oldCh.length - 1)
+      } else if (isDef(oldVnode.text)) {
+        nodeOps.setTextContent(elm, '')
+      }
+    } else if (oldVnode.text !== vnode.text) {
+      nodeOps.setTextContent(elm, vnode.text)
+    }
+    if (isDef(data)) {
+      if (isDef(i = data.hook) && isDef(i = i.postpatch)) i(oldVnode, vnode)
+    }
+}
+
+prepatch (oldVnode: MountedComponentVNode, vnode: MountedComponentVNode) {
+    const options = vnode.componentOptions
+    const child = vnode.componentInstance = oldVnode.componentInstance
+    updateChildComponent(
+      child,
+      options.propsData, // updated props
+      options.listeners, // updated listeners
+      vnode, // new parent vnode
+      options.children // new children
+    )
+},
+```
+
+```JavaScript
+export function updateChildComponent (
+  vm: Component,
+  propsData: ?Object,
+  listeners: ?Object,
+  parentVnode: MountedComponentVNode,
+  renderChildren: ?Array<VNode>
+) {
+  if (process.env.NODE_ENV !== 'production') {
+    isUpdatingChildComponent = true
   }
-} else if (oldVnode.text !== vnode.text) {
-  nodeOps.setTextContent(elm, vnode.text)
+
+  // determine whether component has slot children
+  // we need to do this before overwriting $options._renderChildren
+  const hasChildren = !!(
+    renderChildren ||               // has new static slots
+    vm.$options._renderChildren ||  // has old static slots
+    parentVnode.data.scopedSlots || // has new scoped slots
+    vm.$scopedSlots !== emptyObject // has old scoped slots
+  )
+
+  vm.$options._parentVnode = parentVnode
+  vm.$vnode = parentVnode // update vm's placeholder node without re-render
+
+  if (vm._vnode) { // update child tree's parent
+    vm._vnode.parent = parentVnode
+  }
+  vm.$options._renderChildren = renderChildren
+
+  // update $attrs and $listeners hash
+  // these are also reactive so they may trigger child update if the child
+  // used them during render
+  vm.$attrs = parentVnode.data.attrs || emptyObject
+  vm.$listeners = listeners || emptyObject
+
+  // update props
+  if (propsData && vm.$options.props) {
+    toggleObserving(false)
+    const props = vm._props
+    const propKeys = vm.$options._propKeys || []
+    for (let i = 0; i < propKeys.length; i++) {
+      const key = propKeys[i]
+      const propOptions: any = vm.$options.props // wtf flow?
+      props[key] = validateProp(key, propOptions, propsData, vm)
+    }
+    toggleObserving(true)
+    // keep a copy of raw propsData
+    vm.$options.propsData = propsData
+  }
+
+  // update listeners
+  listeners = listeners || emptyObject
+  const oldListeners = vm.$options._parentListeners
+  vm.$options._parentListeners = listeners
+  updateComponentListeners(vm, listeners, oldListeners)
+
+  // resolve slots + force update if has children
+  if (hasChildren) {
+    vm.$slots = resolveSlots(renderChildren, parentVnode.context)
+    vm.$forceUpdate()
+  }
+
+  if (process.env.NODE_ENV !== 'production') {
+    isUpdatingChildComponent = false
+  }
 }
 ```
 
-如果 `vnode` 是个文本节点且新旧文本不相同，则直接替换文本内容。如果不是文本节点，则判断它们的子节点，并分了几种情况处理：
+patchVnode方法中，如果vnode是一个占位符vnode，那么会执行vnode的data上的prepatch钩子。接下来，如果 `vnode` 是个文本节点且新旧文本不相同，则直接替换文本内容。如果不是文本节点，则判断它们的子节点，并分了几种情况处理：
 
-1. `oldCh` 与 `ch` 都存在且不相同时，使用 `updateChildren` 函数来更新子节点，这个后面重点讲。
+1.`oldCh` 与 `ch` 都存在且不相同时，使用 `updateChildren` 函数来更新子节点，这个后面重点讲。
 
 2.如果只有 `ch` 存在，表示旧节点不需要了。如果旧的节点是文本节点则先将节点的文本清除，然后通过 `addVnodes` 将 `ch` 批量插入到新节点 `elm` 下。
 
 3.如果只有 `oldCh` 存在，表示更新的是空节点，则需要将旧的节点通过 `removeVnodes` 全部清除。
 
-4.当只有旧节点是文本节点的时候，则清除其节点文本内容。
+4.如果`oldCh` 与 `ch` 都不存在，且只有旧节点是文本节点的时候，则清除其节点文本内容。
+
+在下面的例子中，在生成的页面上点击toggle按钮，会触发App.vue渲染，执行patchVnode方法。此时，oldVnode和vnode分别包含3个children，即HelloWorld的占位符vnode，注释节点vnode和button的vnode。patchVnode方法中，会往下执行updateChildren方法。在updateChildren方法中，又会调用patchVnode方法，传入的两个参数oldVnode和vnode分别是改变前和改变后的HelloWorld的占位符vnode（两个vnode的props不一样）。此次执行patchVnode方法，会去执行prepatch钩子。prepatch钩子中调用了updateChildComponent方法，该方法中对vm.$attrs、 vm.$listeners和props（真正起作用的时props的重新赋值）进行了赋值，触发了相应的set属性符，导致子组件的渲染watcher重新计算，于是HelloWorld子组件在下一个tick重新渲染，这个tick会接着完成App.vue的更新。在更新HelloWorld子组件的时候，patchVnode方法中，oldVnode和vnode不是sameVnode的，因此会走三步，1.创建新的节点ul；2.更新父的占位符节点；3.删除旧的节点。
+
+```vue
+<template>
+  <div id="app">
+    <HelloWorld :flag="flag"></HelloWorld>   
+    <button @click="toggle">toggle</button>
+  </div>
+</template>
+
+<script>
+import HelloWorld from './components/HelloWorld'
+export default {
+  name: 'App',
+  components: {
+      HelloWorld
+  },
+  data() {
+      return {
+          flag: true,
+      }
+  },
+  methods: {
+      toggle() {
+          this.flag = !this.flag
+      },
+  }
+}
+</script>
 
 
+<template>
+  <div class="hello" v-if="flag">
+    <h1>{{ nested.msg }}</h1>
+    <h2>esstial links</h2>
+    <h2>esstial system</h2>  
+  </div>
+  <ul v-else>
+      <li>a</li>
+      <li>b</li>
+      <li>c</li>
+  </ul>
+</template>
+
+<script>
+export default {
+  name: 'HelloWorld',
+  props: {
+    flag: Boolean
+  },
+  data() {
+      return {
+          nested: {
+              msg: 'welcome to your Vue.js App'
+          }
+      }
+  }
+  
+}
+</script>
+```
+
+既然sameVnode的两个节点是复用，那么如何更新两个sameVnode节点的样式和属性呢？个人怀疑是在钩子中去执行的。
 
 ## 三、updateChildren方法
 
