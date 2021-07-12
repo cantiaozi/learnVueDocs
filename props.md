@@ -1,7 +1,4 @@
 
-
-
-
 ## 一、规范化
 
 在初始化props之前，会对props进行一次规范化。在组件的初始化过程中，会调用mergeOptinons方法合并配置。在该方法中，调用了normalizeProps将props进行了规范化。normalizeProps传入了两个参数，组件上自定义的options配置和vm实例。因为在组件中定义props的时候，vue支持数组和对象的形式。规范化就是将props转化为对象的形式。
@@ -362,6 +359,251 @@ function assertType (value: any, type: Function): {
 
 ### 2.2实现响应式
 
-initProps方法中，调用validateProp方法实现校验和求值后，再调用
+initProps方法中，调用validateProp方法实现校验和求值后，再调用defineReactive方法实现prop的响应式，并将prop的值保存在vm的_props属性上。当访问vm. _props 上的相应key值的prop时，就会触发依赖收集。调用defineReactive方法传入了3个参数，vm. _props、 prop的key和prop的值。defineReactive方法内部判断当prop的值是一个对象的时候，会调用observe方法将这个对象也变成响应式的。因此，当prop值是一个对象，我们在父组件中改变这个对象的某个属性时，也会触发set属性描述符，导致组件渲染。
 
-defineReactive方法实现prop的响应式，并将
+收集依赖：当我们在初次渲染组件时，render方法生成渲染vnode，该过程会访问vm. _props属性上的prop值。触发get描述符通知相关dep对象收集该组件的渲染watcher。
+
+看下面的例子。在初次渲染时，CompA组件访问了vm. _prop 上的hobby属性，相关dep对象（id为8）收集到CompA组件的渲染watcher。当我们在点击change按钮的时候，会触发app重新渲染，在render生成渲染vnode的过程中，会访问到data中的hobby等属性，因此hobby的dep（此hobby是data中的hobby，和CompA组件实例 _prop属性上的hobby不一样）对象会收集app的渲染watcher。app在patch时，在进行patchVnode的过程中，遇到了CompA的占位符vnode，于是对vnode执行prepatch，然后执行updateChildComponent方法。在该方法中，因为对CompA实例vm的 _prop上的hobby的值进行了修改，所以会触发hobby的dep对象相关的渲染watcher（即CompA的渲染watcher）重新渲染。
+
+```JavaScript
+import Vue from 'vue'
+let CompA = {
+    template: `
+        <div>
+            <div>{{name}}</div>
+            <div>{{hobby}}</div>
+        </div>
+    `,
+    updated() {
+        console.log("compa updated")
+    },
+    props: ['name', 'hobby']
+}
+
+let app = new Vue({
+    el: '#app',
+    components: {CompA},
+    template: `
+        <div>
+            <div>{{title}}</div>
+            <CompA :name="name" :hobby="hobby"/>
+            <button @click="change">change</button>
+            <button @click="toggle">toggle</button>
+            <button @click="changeTitle">changeTitle</button>
+        </div>
+    `,
+    data: {
+        name: 'liuyong',
+        hobby: 'diaoyu',
+        title: 'des'
+    },
+    methods: {
+        change() {
+            this.hobby = {
+                first: 'diaoyu',
+                second: 'run'
+            }
+        },
+        toggle() {
+            this.hobby.first = 'diaoxia'
+        },
+        changeTitle() {
+            this.title = 'descrition'
+        }
+    }
+})
+```
+
+再看下面这个例子：当CompA在首次渲染时，props在初始化时，将vm. _props上的hobby属性设置为响应式的时候，因为hobby的值是一个对象，所以会调用observe方法将其也设置为响应式的，但是其实这个hobby的值是app传过来的，所以已经是响应式的了。后面CompA将hobby渲染在页面上，render生成渲染vnode的时候调用了JSON.stringify方法将hobby转化为字符串，因此造成了vm. _props中hobby以及hobby中first和second属性的访问，触发了相关的dep（ _props中hobby属性的dep的id为9，first属性的dep的id 为5）对象收集CompA的渲染watcher。
+
+```JavaScript
+import Vue from 'vue'
+let CompA = {
+    template: `
+        <div>
+            <div>{{hobby}}</div>
+        </div>
+    `,
+    updated() {
+        console.log("compa updated")
+    },
+    props: ['hobby']
+}
+
+let app = new Vue({
+    el: '#app',
+    components: {CompA},
+    template: `
+        <div>
+            
+            <CompA :hobby="hobby"/>
+            <button @click="toggle">toggle</button>
+        </div>
+    `,
+    data: {
+        hobby: {
+            first: 'diaoyu',
+            second: 'run'
+        },
+    },
+    updated() {
+        console.log("app updated")
+    },
+    methods: {
+        toggle() {
+            this.hobby.first = 'diaoxia'
+        },
+    }
+
+})
+```
+
+
+
+### 2.3 代理
+
+调用proxy方法，将对vm实例上prop属性的访问代理到vm._prop上的相关key的prop上。如果是new Vue生成vue实例，那么就是在此时进行的prop代理。
+
+但是如果是组件，prop代理发生的时刻并不在此时。而是在组件生成构造函数调用extend方法时，已经对prop进行了代理。这样就不需要在每个组件实例上给prop做代理，是一个优化。
+
+```javascript
+Vue.extend = function (extendOptions: Object): Function {
+    ......
+    const Sub = function VueComponent (options) {
+      this._init(options)
+    }
+    ......
+    if (Sub.options.props) {
+      initProps(Sub)
+    }
+    if (Sub.options.computed) {
+      initComputed(Sub)
+    }
+
+    ......
+    return Sub
+}
+
+function initProps (Comp) {
+  const props = Comp.options.props
+  for (const key in props) {
+    proxy(Comp.prototype, `_props`, key)
+  }
+}
+```
+
+
+
+## 三、props的更新
+
+ 当父组件传递给子组件的 `props` 值变化，子组件对应的值也会改变，同时会触发子组件的重新渲染。 `prop` 数据的值变化在父组件，我们知道在父组件的 `render` 过程中会访问到这个 `prop` 数据，所以当 `prop` 数据变化一定会触发父组件的重新渲染，那么重新渲染是如何更新子组件对应的 `prop` 的值呢？ 
+
+###  3.1子组件props的更新
+
+在父组件重新渲染的最后，会执行 `patch` 过程，进而执行 `patchVnode` 函数，`patchVnode` 通常是一个递归过程，当它遇到组件 `vnode` （即占位符vnode）的时候，会执行组件更新过程的 `prepatch` 钩子函数，在 `src/core/vdom/patch.js` 中： 
+
+```js
+function patchVnode (
+  oldVnode,
+  vnode,
+  insertedVnodeQueue,
+  ownerArray,
+  index,
+  removeOnly
+) {
+  // ...
+
+  let i
+  const data = vnode.data
+  if (isDef(data) && isDef(i = data.hook) && isDef(i = i.prepatch)) {
+    i(oldVnode, vnode)
+  }
+  // ...
+}
+```
+
+`prepatch` 函数定义在 `src/core/vdom/create-component.js` 中：
+
+```js
+prepatch (oldVnode: MountedComponentVNode, vnode: MountedComponentVNode) {
+  const options = vnode.componentOptions
+  const child = vnode.componentInstance = oldVnode.componentInstance
+  updateChildComponent(
+    child,
+    options.propsData, // updated props
+    options.listeners, // updated listeners
+    vnode, // new parent vnode
+    options.children // new children
+  )
+}
+```
+
+内部会调用 `updateChildComponent` 方法来更新 `props`，注意第二个参数就是父组件的 `propData`，那么为什么 `vnode.componentOptions.propsData` 就是父组件传递给子组件的 `prop` 数据呢（这个也同样解释了第一次渲染的 `propsData` 来源）？原来在组件的 `render` 过程中，对于组件节点会通过 `createComponent` 方法来创建组件 `vnode`：
+
+```js
+export function createComponent (
+  Ctor: Class<Component> | Function | Object | void,
+  data: ?VNodeData,
+  context: Component,
+  children: ?Array<VNode>,
+  tag?: string
+): VNode | Array<VNode> | void {
+  // ...
+
+  // extract props
+  const propsData = extractPropsFromVNodeData(data, Ctor, tag)
+
+  // ...
+  
+  const vnode = new VNode(
+    `vue-component-${Ctor.cid}${name ? `-${name}` : ''}`,
+    data, undefined, undefined, undefined, context,
+    { Ctor, propsData, listeners, tag, children },
+    asyncFactory
+  )
+
+  // ...
+  
+  return vnode
+}
+```
+
+ 在创建组件 `vnode` 的过程中，首先从 `data` 中提取出 `propData`，然后在 `new VNode` 的时候，作为第七个参数 `VNodeComponentOptions` 中的一个属性传入，所以我们可以通过 `vnode.componentOptions.propsData` 拿到 `prop` 数据。 
+
+接着看 `updateChildComponent` 函数，它的定义在 `src/core/instance/lifecycle.js` 中：
+
+```js
+export function updateChildComponent (
+  vm: Component,
+  propsData: ?Object,
+  listeners: ?Object,
+  parentVnode: MountedComponentVNode,
+  renderChildren: ?Array<VNode>
+) {
+  // ...
+
+  // update props
+  if (propsData && vm.$options.props) {
+    toggleObserving(false)
+    const props = vm._props
+    const propKeys = vm.$options._propKeys || []
+    for (let i = 0; i < propKeys.length; i++) {
+      const key = propKeys[i]
+      const propOptions: any = vm.$options.props // wtf flow?
+      props[key] = validateProp(key, propOptions, propsData, vm)
+    }
+    toggleObserving(true)
+    // keep a copy of raw propsData
+    vm.$options.propsData = propsData
+  }
+
+  // ...
+}
+```
+
+我们重点来看更新 `props` 的相关逻辑，这里的 `propsData` 是父组件传递的 `props` 数据，`vm` 是子组件的实例。`vm._props` 指向的就是子组件的 `props` 值，`propKeys` 就是在之前 `initProps` 过程中，缓存的子组件中定义的所有 `prop` 的 `key`。主要逻辑就是遍历 `propKeys`，然后执行 `props[key] = validateProp(key, propOptions, propsData, vm)` 重新验证和计算新的 `prop` 数据，更新 `vm._props`，也就是子组件的 `props`，这个就是子组件 `props` 的更新过程。
+
+### 3.2子组件的重新渲染
+
+子组件重新渲染的两种情况：1.父组件中修改了子组件的prop值，触发prop的setter，进而使子组件重新渲染；2.子组件的某个prop值是一个对象，父组件中没有修改prop的值，但是在父组件或者子组件中修改了该prop对象的某个属性，触发了子组件的渲染。（详情看2.2节）
+
