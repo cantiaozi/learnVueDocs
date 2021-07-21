@@ -40,7 +40,7 @@ function processAttrs (el) {
   for (i = 0, l = list.length; i < l; i++) {
     name = rawName = list[i].name
     value = list[i].value
-    //判断是否是vue自定义属性，以v-或者：开头
+    //判断是否是vue自定义属性，以v-或者：@开头
     if (dirRE.test(name)) {
       // mark element as dynamic
       el.hasBindings = true
@@ -261,6 +261,7 @@ export function genHandlers (
   for (const name in events) {
     res += `"${name}":${genHandler(name, events[name])},`
   }
+  //去掉res最后面的逗号
   return res.slice(0, -1) + '}'
 }
 
@@ -375,5 +376,55 @@ function genFilterCode (key: string): string {
     `)`
   )
 }
+```
+
+最终，child组件上select事件生成的代码字符串为 `on:{"select":selectHandler}`，click事件生成的代码字符串为 `nativeOn:{"click":function($event){$event.preventDefault();return clickHandler($event)}}`。button标签上click事件生成的代码字符串为 `on:{"click":function($event){clickHandler($event)}}`。
+
+三、DOM事件
+
+在组件的渲染过程中，render生成渲染vnode后，会调用patch方法。patch方法是调用createPatchFunction生成的。createPatchFunction执行时，会生成一系列钩子函数。这些钩子函数定义在core/vdom/modules/index和web/runtime/modules/index中。
+
+```JavaScript
+import baseModules from 'core/vdom/modules/index'
+import platformModules from 'web/runtime/modules/index'
+
+// the directive module should be applied last, after all
+// built-in modules have been applied.
+const modules = platformModules.concat(baseModules)
+
+export const patch: Function = createPatchFunction({ nodeOps, modules })
+```
+
+```JavaScript
+const hooks = ['create', 'activate', 'update', 'remove', 'destroy']
+export function createPatchFunction (backend) {
+	......
+	const { modules, nodeOps } = backend
+	for (i = 0; i < hooks.length; ++i) {
+        cbs[hooks[i]] = []
+        for (j = 0; j < modules.length; ++j) {
+          if (isDef(modules[j][hooks[i]])) {
+            cbs[hooks[i]].push(modules[j][hooks[i]])
+          }
+        }
+    }
+    ...
+}
+```
+
+与事件有关的钩子函数web/runtime/modules/events.js中，有create和update两个钩子。create钩子是在invokeCreateHooks函数中执行的。invokeCreateHooks函数执行有两个时机。一是在createComponent函数中，当组件的占位符vnode渲染成实际dom插入到页面之前会调用initComponent方法。initComponent方法中会调用invokeCreateHooks函数。二是在createElm方法中，当渲染vnode生成实际dom插入到页面之前会调用。
+
+```javascript
+function invokeCreateHooks (vnode, insertedVnodeQueue) {
+    //执行cbs中的所有create钩子函数
+    for (let i = 0; i < cbs.create.length; ++i) {
+      cbs.create[i](emptyNode, vnode)
+    }
+    i = vnode.data.hook // Reuse variable
+    if (isDef(i)) {
+      if (isDef(i.create)) i.create(emptyNode, vnode)
+      if (isDef(i.insert)) insertedVnodeQueue.push(vnode)
+    }
+  }
 ```
 
