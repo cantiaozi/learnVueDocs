@@ -380,7 +380,7 @@ function genFilterCode (key: string): string {
 
 最终，child组件上select事件生成的代码字符串为 `on:{"select":selectHandler}`，click事件生成的代码字符串为 `nativeOn:{"click":function($event){$event.preventDefault();return clickHandler($event)}}`。button标签上click事件生成的代码字符串为 `on:{"click":function($event){clickHandler($event)}}`。
 
-三、DOM事件
+## 三、原生事件
 
 在组件的渲染过程中，render生成渲染vnode后，会调用patch方法。patch方法是调用createPatchFunction生成的。createPatchFunction执行时，会生成一系列钩子函数。这些钩子函数定义在core/vdom/modules/index和web/runtime/modules/index中。
 
@@ -428,3 +428,332 @@ function invokeCreateHooks (vnode, insertedVnodeQueue) {
   }
 ```
 
+update钩子是在patchVnode方法中调用的
+
+```JavaScript
+if (isDef(data) && isPatchable(vnode)) {
+      //这里for循环调用了update钩子函数
+      for (i = 0; i < cbs.update.length; ++i) cbs.update[i](oldVnode, vnode)
+      if (isDef(i = data.hook) && isDef(i = i.update)) i(oldVnode, vnode)
+}
+```
+
+事件的create和update钩子函数对应的是一个函数updateDOMListeners。
+
+```JavaScript
+function updateDOMListeners (oldVnode: VNodeWithData, vnode: VNodeWithData) {
+  //执行create的时候，传入的oldVnode是一个空的vnode
+  //oldVnode.data.on是编译生成的on对象。例如例子中的on:{"select":selectHandler}
+  if (isUndef(oldVnode.data.on) && isUndef(vnode.data.on)) {
+    return
+  }
+  const on = vnode.data.on || {}
+  const oldOn = oldVnode.data.on || {}
+  target = vnode.elm
+  //处理v-model的，可以暂时不看
+  normalizeEvents(on)
+  updateListeners(on, oldOn, add, remove, vnode.context)
+  target = undefined
+}
+
+export function updateListeners (
+  on: Object,
+  oldOn: Object,
+  add: Function,
+  remove: Function,
+  vm: Component
+) {
+  let name, def, cur, old, event
+  for (name in on) {
+    def = cur = on[name]
+    old = oldOn[name]
+    //解析出事件名中的once、passive和capture修饰符
+    event = normalizeEvent(name)
+    /* istanbul ignore if */
+    if (__WEEX__ && isPlainObject(def)) {
+      cur = def.handler
+      event.params = def.params
+    }
+    if (isUndef(cur)) {
+      process.env.NODE_ENV !== 'production' && warn(
+        `Invalid handler for event "${event.name}": got ` + String(cur),
+        vm
+      )
+    //old不存在，说明是create，创建事件的情况
+    } else if (isUndef(old)) {
+      //刚开始事件处理函数上的fns属性不存在
+      if (isUndef(cur.fns)) {
+        //创建最终的事件回调函数
+        cur = on[name] = createFnInvoker(cur)
+      }
+      add(event.name, cur, event.once, event.capture, event.passive, event.params)
+    //执行update，更新事件的情况
+    } else if (cur !== old) {
+      //直接将新的事件处理函数赋给invoker的fns属性
+      //因为最终的事件处理函数是invoker函数，invoker函数中会执行invoker的fns属性
+      old.fns = cur
+      on[name] = old
+    }
+  }
+  for (name in oldOn) {
+    if (isUndef(on[name])) {
+      event = normalizeEvent(name)
+      remove(event.name, oldOn[name], event.capture)
+    }
+  }
+}
+
+const normalizeEvent = cached((name: string): {
+  name: string,
+  once: boolean,
+  capture: boolean,
+  passive: boolean,
+  handler?: Function,
+  params?: Array<any>
+} => {
+  //在编译阶段，遇到事件上的passive、once和capture修饰符，会添加一些标记
+  //这里会解析出标记代表的修饰符
+  const passive = name.charAt(0) === '&'
+  name = passive ? name.slice(1) : name
+  const once = name.charAt(0) === '~' // Prefixed last, checked first
+  name = once ? name.slice(1) : name
+  const capture = name.charAt(0) === '!'
+  name = capture ? name.slice(1) : name
+  return {
+    name,
+    once,
+    capture,
+    passive
+  }
+})
+
+//可以给事件定义多个处理函数，因此fns可能是函数，可能是数组
+export function createFnInvoker (fns: Function | Array<Function>): Function {
+  //invoker是最终的事件回调函数
+  function invoker () {
+    const fns = invoker.fns
+    //执行真正的定义的回调函数
+    if (Array.isArray(fns)) {
+      const cloned = fns.slice()
+      for (let i = 0; i < cloned.length; i++) {
+        cloned[i].apply(null, arguments)
+      }
+    } else {
+      // return handler return value for single handlers
+      return fns.apply(null, arguments)
+    }
+  }
+  invoker.fns = fns
+  return invoker
+}
+```
+
+在updateDOMListeners方法中，调用add方法给dom添加原生事件。
+
+```JavaScript
+function add (
+  event: string,
+  handler: Function,
+  once: boolean,
+  capture: boolean,
+  passive: boolean
+) {
+  //调用withMacroTask给事件处理函数做了一层包装，保证事件处理函数在执行时，组件渲染更新走的是
+  //宏任务
+  handler = withMacroTask(handler)
+  //如果有once修饰符，在给事件处理函数包装一层
+  //在执行完一次事件处理函数后，调用remove移除监听
+  if (once) handler = createOnceHandler(handler, event, capture)
+  //调用dom的addEventListener给其添加原生事件监听函数
+  target.addEventListener(
+    event,
+    handler,
+    supportsPassive
+      ? { capture, passive }
+      : capture
+  )
+}
+
+export function withMacroTask (fn: Function): Function {
+  return fn._withTask || (fn._withTask = function () {
+    useMacroTask = true
+    const res = fn.apply(null, arguments)
+    useMacroTask = false
+    return res
+  })
+}
+
+function createOnceHandler (handler, event, capture) {
+  const _target = target // save current target element in closure
+  return function onceHandler () {
+    const res = handler.apply(null, arguments)
+    if (res !== null) {
+      remove(event, onceHandler, capture, _target)
+    }
+  }
+}
+```
+
+对于原生的dom来说，只能定义原生事件。对于组件来说，事件上有修饰符native，那么parse最终生成的代码是类似于 `nativeOn:{"click":function($event){$event.preventDefault();return clickHandler($event)}}`这样的。没有的话生成的代码是on。但是给dom添加原生事件的时候看的是on而不是native，因为createComponent方法中做了下面的处理。
+
+```
+const listeners = data.on
+  // replace with listeners with .native modifier
+  // so it gets processed during parent component patch.
+  data.on = data.nativeOn
+```
+
+在本文的例子中，child组件上的原生事件click事件处理函数也被添加到了button这个dom元素上。因为child组件的渲染vnode的elm属性指向的是button这个dom。因为在渲染过程中子组件比父组件先patch生成dom，因此子组件先执行invokeCreateHooks函数。所以本文中的button这个dom上的两个原生的click事件，在child组件上的click事件处理函数后注册，后执行。
+
+在点击button按钮的时候，会触发click的事件处理函数clickHandler。因为渲染vnode是调用render函数生成的，在访问clickHandler的时候拿到的是render函数中的clickHandler。而render函数中包了一层this，改变了作用域，访问的是this即组件vm上的clickHandler。
+
+四、自定义事件
+
+自定义事件保存在组件实例vm的$options. _parentListeners上。在组件执行init的过程中，会调用initEvents方法。
+
+```JavaScript
+export function initEvents (vm: Component) {
+  //_events保留事件中心的所有事件
+  vm._events = Object.create(null)
+  vm._hasHookEvent = false
+  // init parent attached events
+  const listeners = vm.$options._parentListeners
+  if (listeners) {
+    updateComponentListeners(vm, listeners)
+  }
+}
+
+export function updateComponentListeners (
+  vm: Component,
+  listeners: Object,
+  oldListeners: ?Object
+) {
+  target = vm
+  updateListeners(listeners, oldListeners || {}, add, remove, vm)
+  target = undefined
+}
+```
+
+initEvents中调用了updateComponentListeners方法。updateComponentListeners中又调用了updateListeners方法，与原生事件中调用的那个updateListeners一样，但是传入的add和remove方法是不一样的。
+
+```JavaScript
+function add (event, fn, once) {
+  if (once) {
+    target.$once(event, fn)
+  } else {
+    target.$on(event, fn)
+  }
+}
+
+function remove (event, fn) {
+  target.$off(event, fn)
+}
+```
+
+$on、$off、$once和$emit都定义在core/instance/events.js中。这是一个典型的事件中心的实现。	
+
+```JavaScript
+Vue.prototype.$on = function (event: string | Array<string>, fn: Function): Component {
+    const vm: Component = this
+    if (Array.isArray(event)) {
+      for (let i = 0, l = event.length; i < l; i++) {
+        this.$on(event[i], fn)
+      }
+    } else {
+      //看事件中心是否又对应的事件，如果有将处理函数push到数组中，如果没有，新生成
+      //一个空数组存放该事件的所有事件处理函数
+      (vm._events[event] || (vm._events[event] = [])).push(fn)
+      // optimize hook:event cost by using a boolean flag marked at registration
+      // instead of a hash lookup
+      if (hookRE.test(event)) {
+        vm._hasHookEvent = true
+      }
+    }
+    return vm
+}
+
+Vue.prototype.$once = function (event: string, fn: Function): Component {
+    const vm: Component = this
+    //$once保证事件执行一次，然后就被$off注销掉
+    function on () {
+      vm.$off(event, on)
+      fn.apply(vm, arguments)
+    }
+    on.fn = fn
+    vm.$on(event, on)
+    return vm
+}
+
+Vue.prototype.$off = function (event?: string | Array<string>, fn?: Function): Component {
+    const vm: Component = this
+    // all
+    //当$off不传任何参数时，清空组件vm上的所有事件
+    if (!arguments.length) {
+      vm._events = Object.create(null)
+      return vm
+    }
+    // array of events
+    if (Array.isArray(event)) {
+      for (let i = 0, l = event.length; i < l; i++) {
+        this.$off(event[i], fn)
+      }
+      return vm
+    }
+    // specific event
+    const cbs = vm._events[event]
+    if (!cbs) {
+      return vm
+    }
+    //当$off只传了一个参数时，会清楚该事件的所有处理函数
+    if (!fn) {
+      vm._events[event] = null
+      return vm
+    }
+    if (fn) {
+      // specific handler
+      let cb
+      let i = cbs.length
+      while (i--) {
+        cb = cbs[i]
+        if (cb === fn || cb.fn === fn) {
+          cbs.splice(i, 1)
+          break
+        }
+      }
+    }
+    return vm
+}
+
+Vue.prototype.$emit = function (event: string): Component {
+    const vm: Component = this
+    if (process.env.NODE_ENV !== 'production') {
+      const lowerCaseEvent = event.toLowerCase()
+      if (lowerCaseEvent !== event && vm._events[lowerCaseEvent]) {
+        tip(
+          `Event "${lowerCaseEvent}" is emitted in component ` +
+          `${formatComponentName(vm)} but the handler is registered for "${event}". ` +
+          `Note that HTML attributes are case-insensitive and you cannot use ` +
+          `v-on to listen to camelCase events when using in-DOM templates. ` +
+          `You should probably use "${hyphenate(event)}" instead of "${event}".`
+        )
+      }
+    }
+    let cbs = vm._events[event]
+    if (cbs) {
+      cbs = cbs.length > 1 ? toArray(cbs) : cbs
+      const args = toArray(arguments, 1)
+      for (let i = 0, l = cbs.length; i < l; i++) {
+        try {
+          cbs[i].apply(vm, args)
+        } catch (e) {
+          handleError(e, vm, `event handler for "${event}"`)
+        }
+      }
+    }
+    return vm
+}
+```
+
+vue的自定义事件是典型的事件中心的实现。有一个vm. _events对象保存所有的事件处理函数。其中 _events对象中的key是事件名，对应的值是一个数组，保存对应的事件处理函数。当调用$on的时候将事件处理函数push到 _events对象相应的事件的数组中。当调用$emit的时候，拿到vm _events中相应的事件处理函数，对该数组循环执行一遍。$emit和$on实现父子组件间的通信，看起来像是父组件监听子组件的事件，其实不是。其实事件都保存在子组件上，只不过事件处理函数是定义在父组件中罢了。
+
+例如本文例子中，child组件上自定义了select事件。select事件及其事件处理函数被保存在child组件的vm. _events对象中。当在child组件内部调用$emit的时候会执行select的事件处理函数。
