@@ -149,81 +149,7 @@ export function genData (el: ASTElement, state: CodegenState): string {
   // directives first.
   // directives may mutate the el's other properties before they are generated.
   const dirs = genDirectives(el, state)
-  if (dirs) data += dirs + ','
-
-  // key
-  if (el.key) {
-    data += `key:${el.key},`
-  }
-  // ref
-  if (el.ref) {
-    data += `ref:${el.ref},`
-  }
-  if (el.refInFor) {
-    data += `refInFor:true,`
-  }
-  // pre
-  if (el.pre) {
-    data += `pre:true,`
-  }
-  // record original tag name for components using "is" attribute
-  if (el.component) {
-    data += `tag:"${el.tag}",`
-  }
-  // module data generation functions
-  for (let i = 0; i < state.dataGenFns.length; i++) {
-    data += state.dataGenFns[i](el)
-  }
-  // attributes
-  if (el.attrs) {
-    data += `attrs:{${genProps(el.attrs)}},`
-  }
-  // DOM props
-  if (el.props) {
-    data += `domProps:{${genProps(el.props)}},`
-  }
-  // event handlers
-  if (el.events) {
-    data += `${genHandlers(el.events, false, state.warn)},`
-  }
-  if (el.nativeEvents) {
-    data += `${genHandlers(el.nativeEvents, true, state.warn)},`
-  }
-  // slot target
-  // only for non-scoped slots
-  if (el.slotTarget && !el.slotScope) {
-    data += `slot:${el.slotTarget},`
-  }
-  // scoped slots
-  if (el.scopedSlots) {
-    data += `${genScopedSlots(el.scopedSlots, state)},`
-  }
-  // component v-model
-  if (el.model) {
-    data += `model:{value:${
-      el.model.value
-    },callback:${
-      el.model.callback
-    },expression:${
-      el.model.expression
-    }},`
-  }
-  // inline-template
-  if (el.inlineTemplate) {
-    const inlineTemplate = genInlineTemplate(el, state)
-    if (inlineTemplate) {
-      data += `${inlineTemplate},`
-    }
-  }
-  data = data.replace(/,$/, '') + '}'
-  // v-bind data wrap
-  if (el.wrapData) {
-    data = el.wrapData(data)
-  }
-  // v-on data wrap
-  if (el.wrapListeners) {
-    data = el.wrapListeners(data)
-  }
+  ......
   return data
 }
 
@@ -471,7 +397,7 @@ export function addHandler (
 
 本文例子最后codegen生成的代码字符串`"with(this){return _c('div',[_c('p',[_v(\"Message is: \"+_s(message))]),_c('input',{directives:[{name:\"model\",rawName:\"v-model\",value:(message),expression:\"message\"}],attrs:{\"placeholder\":\"edit me\"},domProps:{\"value\":(message)},on:{\"input\":function($event){if($event.target.composing)return;message=$event.target.value}}})])}"`
 
-三、运行时阶段
+## 三、运行时阶段
 
 v-model是v-bind和v-on的语法糖。因此，在本文例子中，下面的写法是等效的。
 
@@ -493,6 +419,8 @@ new Vue({
 ![](D:\前端开发笔记\JavaScript\learnVueDocs-main\others\v-model与语法糖的区别1.png)
 
 当使用v-bind和v-on的时候，情况如下图。![](D:\前端开发笔记\JavaScript\learnVueDocs-main\others\v-model和语法糖的区别2.png)
+
+### 1.表单上使用v-model
 
 上一篇文章我们在分析events的时候得知，当组件在patch的时候会执行很多的钩子函数。与directives指令相关的钩子函数定义在core/vdom/modules/directives下面的，包括创建、更新和销毁三个钩子函数。
 
@@ -553,6 +481,7 @@ function _update (oldVnode, vnode) {
       }
     }
     if (isCreate) {
+      //将callInsert函数设置为vnode的insert钩子函数
       mergeVNodeHook(vnode, 'insert', callInsert)
     } else {
       callInsert()
@@ -576,9 +505,47 @@ function _update (oldVnode, vnode) {
     }
   }
 }
+
+export function mergeVNodeHook (def: Object, hookKey: string, hook: Function) {
+  if (def instanceof VNode) {
+    def = def.data.hook || (def.data.hook = {})
+  }
+  let invoker
+  const oldHook = def[hookKey]
+
+  function wrappedHook () {
+    hook.apply(this, arguments)
+    // important: remove merged hook to ensure it's called only once
+    // and prevent memory leak
+    remove(invoker.fns, wrappedHook)
+  }
+
+  if (isUndef(oldHook)) {
+    // no existing hook
+    //createFnInvoker在events一文中提到过，返回一个invoker函数，
+    //invoker函数内会执行invoker.fns函数
+    //如果invoker.fns是一个函数数组的话，会遍历执行数组中的每个函数
+    invoker = createFnInvoker([wrappedHook])
+  } else {
+    /* istanbul ignore if */
+    //如果原来的vnode.data.hook中有这个钩子函数，那么将新的钩子函数
+    //push到invoker.fns数组上
+    if (isDef(oldHook.fns) && isTrue(oldHook.merged)) {
+      // already a merged invoker
+      invoker = oldHook
+      invoker.fns.push(wrappedHook)
+    } else {
+      // existing plain hook
+      invoker = createFnInvoker([oldHook, wrappedHook])
+    }
+  }
+
+  invoker.merged = true
+  def[hookKey] = invoker
+}
 ```
 
-创建和更新是相同的钩子函数updateDirectives。updateDirectives中调用了 _update函数。 _update函数中调用了normalizeDirectives函数，normalizeDirectives函数会遍历组件上定义的每个指令，拿到每个指令的定义。然后在 _update中判断如果指令是新添加的，就会调用指令的定义中的bind钩子函数；如果是组件更新的话，就会调用指令的定义中的update钩子函数。
+创建和更新是相同的钩子函数updateDirectives。updateDirectives中调用了 _update函数。 _update函数中调用了normalizeDirectives函数，normalizeDirectives函数会遍历组件上定义的每个指令，拿到每个指令的定义。然后在 _update中判断如果指令是新添加的，就会调用指令的定义中的bind钩子函数；如果是组件更新的话，就会调用指令的定义中的update钩子函数。针对v-model这个指令而言，接着会调用mergeVNodeHook函数在vnode.data.hook上生成一个insert钩子函数。而这个vnode.data.hook上的insert钩子函数，其实就是调用指令中定义的inserted函数。
 
 ```JavaScript
 function normalizeDirectives (
@@ -611,6 +578,31 @@ function getRawDirName (dir: VNodeDirective): string {
 }
 ```
 
+那么vnode.data.hook上的insert钩子函数是在什么时候调用的呢？
+
+是在patch函数的最后调用的。此时在patch函数中已经执行完了createElm函数，createElm会生成vnode的真实dom节点并且插入到父节点中，因此已经完成了dom的插入，正是执行指令的inserted钩子的时机。
+
+```JavaScript
+function patch (oldVnode, vnode, hydrating, removeOnly) {
+    ......
+    //调用vnode.data.hook上的inserted钩子
+    invokeInsertHook(vnode, insertedVnodeQueue, isInitialPatch)
+    return vnode.elm
+}
+
+function invokeInsertHook (vnode, queue, initial) {
+    // delay insert hooks for component root nodes, invoke them after the
+    // element is really inserted
+    if (isTrue(initial) && isDef(vnode.parent)) {
+      vnode.parent.data.pendingInsert = queue
+    } else {
+      for (let i = 0; i < queue.length; ++i) {
+        queue[i].data.hook.insert(queue[i])
+      }
+    }
+}
+```
+
 当我们在组件或者vue实例初始化的时候，会在Vue.options上生成一个directives属性。然后在platforms/web/runtime/index.js中将vue原生的指令合并到Vue.options.directives上。vue的原生的指令platformDirectives都定义在platforms/web/runtime/directives 中。	
 
 ```JavaScript
@@ -622,5 +614,234 @@ function initGlobalAPI (Vue: GlobalAPI) {
 
 //platforms/web/runtime/index.js
 extend(Vue.options.directives, platformDirectives)
+```
+
+v-model的指令的定义如下，定义了两个钩子函数inserted和componentUpdated。
+
+inserted钩子函数中，会往真实dom对象上添加两个事件compositionstart和compositionend。compositionstart的事件处理函数中，会给e.target添加一个composing属性，值为true。compositionend事件的处理函数中，会给e.target.composing置为false
+
+```JavaScript
+const directive = {
+  //el是真实的dom对象，binding是指令对象，包括指令名，指令定义和指令绑定的值等
+  inserted (el, binding, vnode, oldVnode) {
+    if (vnode.tag === 'select') {
+      // #6903
+      if (oldVnode.elm && !oldVnode.elm._vOptions) {
+        mergeVNodeHook(vnode, 'postpatch', () => {
+          directive.componentUpdated(el, binding, vnode)
+        })
+      } else {
+        setSelected(el, binding, vnode.context)
+      }
+      el._vOptions = [].map.call(el.options, getValue)
+    //本文中的例子走的是这个逻辑
+    } else if (vnode.tag === 'textarea' || isTextInputType(el.type)) {
+      el._vModifiers = binding.modifiers
+      if (!binding.modifiers.lazy) {
+        //开始新的输入合成时会触发 compositionstart 事件.
+        //例如，当用户使用拼音输入法开始输入汉字时，这个事件就会被触发
+        el.addEventListener('compositionstart', onCompositionStart)
+        //当用户使用拼音输入法输入汉字结束时，这个compositionend事件就会被触发
+        el.addEventListener('compositionend', onCompositionEnd)
+        // Safari < 10.2 & UIWebView doesn't fire compositionend when
+        // switching focus before confirming composition choice
+        // this also fixes the issue where some browsers e.g. iOS Chrome
+        // fires "change" instead of "input" on autocomplete.
+        el.addEventListener('change', onCompositionEnd)
+        /* istanbul ignore if */
+        if (isIE9) {
+          el.vmodel = true
+        }
+      }
+    }
+  },
+
+  componentUpdated (el, binding, vnode) {
+    if (vnode.tag === 'select') {
+      setSelected(el, binding, vnode.context)
+      // in case the options rendered by v-for have changed,
+      // it's possible that the value is out-of-sync with the rendered options.
+      // detect such cases and filter out values that no longer has a matching
+      // option in the DOM.
+      const prevOptions = el._vOptions
+      const curOptions = el._vOptions = [].map.call(el.options, getValue)
+      if (curOptions.some((o, i) => !looseEqual(o, prevOptions[i]))) {
+        // trigger change event if
+        // no matching option found for at least one value
+        const needReset = el.multiple
+          ? binding.value.some(v => hasNoMatchingOption(v, curOptions))
+          : binding.value !== binding.oldValue && hasNoMatchingOption(binding.value, curOptions)
+        if (needReset) {
+          trigger(el, 'change')
+        }
+      }
+    }
+  }
+}
+
+function onCompositionStart (e) {
+  e.target.composing = true
+}
+
+function onCompositionEnd (e) {
+  // prevent triggering an input event for no reason
+  if (!e.target.composing) return
+  e.target.composing = false
+  trigger(e.target, 'input')
+}
+
+function trigger (el, type) {
+  //创建一个事件，定义事件名为input
+  const e = document.createEvent('HTMLEvents')
+  e.initEvent(type, true, true)
+  //在dom对象el上触发这个名为input的事件
+  el.dispatchEvent(e)
+}
+```
+
+在上一小节中，可以得知，v-model编译后会给绑定的元素添加一个input事件。`on:{\"input\":function($event){if($event.target.composing)return;message=$event.target.value}}`。当我们在使用中文输入法输入中文时，会同时触发compositionstart和input事件。因为compositionstart的处理函数中将e.target.composing置为了true，因此在input的处理函数中就会直接返回，不做任何操作。当中文输入结束后，会触发compositionend事件，将e.target.composing置为false，同时触发一次input事件，此时input的处理函数中就会执行 `message=$event.target.value` 这段代码。这就是使用v-model输入中文时，在中文未输入完成时，v-model绑定的数据不改变的原因。
+
+对本文中的实例而言，v-model指令定义中的componentUpdated是未涉及的。
+
+### 2.组件上使用v-model
+
+看下面的这个例子。这个实例可以在组件上实现双向绑定。
+
+```JavaScript
+import Vue from '../node_modules/vue/dist/vue.esm'
+let child = {
+    template: '<div>' + '<input :value="value" @input="updateValue" placeholder="edit me">' 
+        + '</div>',
+    props: ['value'],
+    methods: {
+        updateValue(e) {
+            this.$emit('input', e.target.value)
+        }
+    }
+}
+new Vue({
+    el: '#app',
+    template: '<div>' + '<child v-model="message"></child>' 
+        + '<p>message is {{message}}</p>' + '</div>',
+    data() {
+        return {
+            message: ''
+        }
+    },
+    components: {
+        child
+    }
+})
+```
+
+在组件上使用v-model，它的parse阶段和在表单上是一样的。但是codegen阶段的model函数中，调用的是genComponentModel函数。然后在genData函数中，判断ast节点el上是否有model属性，如果有的话会给最终生成的代码中加上一段代码。
+
+```JavaScript
+export function genComponentModel (
+  el: ASTElement,
+  value: string,
+  modifiers: ?ASTModifiers
+): ?boolean {
+  const { number, trim } = modifiers || {}
+
+  const baseValueExpression = '$$v'
+  let valueExpression = baseValueExpression
+  if (trim) {
+    valueExpression =
+      `(typeof ${baseValueExpression} === 'string'` +
+      `? ${baseValueExpression}.trim()` +
+      `: ${baseValueExpression})`
+  }
+  if (number) {
+    valueExpression = `_n(${valueExpression})`
+  }
+  //genAssignmentCode生成代码字符串
+  const assignment = genAssignmentCode(value, valueExpression)
+  //在ast节点上生成model属性
+  el.model = {
+    value: `(${value})`,
+    expression: `"${value}"`,
+    callback: `function (${baseValueExpression}) {${assignment}}`
+  }
+}
+
+export function genData (el: ASTElement, state: CodegenState): string {
+  let data = '{'
+
+  // directives first.
+  // directives may mutate the el's other properties before they are generated.
+  const dirs = genDirectives(el, state)
+  if (dirs) data += dirs + ','
+  ......
+  
+  // component v-model
+  if (el.model) {
+    data += `model:{value:${
+      el.model.value
+    },callback:${
+      el.model.callback
+    },expression:${
+      el.model.expression
+    }},`
+  }
+  // inline-template
+  if (el.inlineTemplate) {
+    const inlineTemplate = genInlineTemplate(el, state)
+    if (inlineTemplate) {
+      data += `${inlineTemplate},`
+    }
+  }
+  data = data.replace(/,$/, '') + '}'
+  // v-bind data wrap
+  if (el.wrapData) {
+    data = el.wrapData(data)
+  }
+  // v-on data wrap
+  if (el.wrapListeners) {
+    data = el.wrapListeners(data)
+  }
+  return data
+}
+
+```
+
+给ast节点添加的model属性还在哪里用到了呢？在生成组件的占位符vnode时调用createComponent方法，该方法中用到了model对象。
+
+```JavaScript
+function createComponent {
+  ......
+  // transform component v-model data into props & events
+  //本文实例生成的data.model为{model:{value:(message),callback:function ($$v)           {message=$$v},expression:\"message\"}}
+  if (isDef(data.model)) {
+    //将v-model转化为prop和自定义事件
+    transformModel(Ctor.options, data)
+  }
+  ......
+}
+  
+function transformModel (options, data: any) {
+  const prop = (options.model && options.model.prop) || 'value'
+  const event = (options.model && options.model.event) || 'input'
+  ;(data.props || (data.props = {}))[prop] = data.model.value
+  const on = data.on || (data.on = {})
+  if (isDef(on[event])) {
+    on[event] = [data.model.callback].concat(on[event])
+  } else {
+    on[event] = data.model.callback
+  }
+}
+```
+
+最终，new Vue实例编译生成的代码 `with(this){return _c('div',[_c('child',{model:{value:(message),callback:function ($$v) {message=$$v},expression:\"message\"}}),_c('p',[_v(\"message is \"+_s(message))])],1)}`。v-model经过转化相当于是在组件上设置了prop和events，在本文的例子中如下图所示。
+
+![](E:\开发文档\新建文件夹\learnVueDocs\others\组件上v-model.png)
+
+当在child组件上定义下面的配置时，那么v-model经过转化的prop的key是checked，监听的自定义事件的名称为change。
+
+```JavaScript
+model: {
+    prop: 'checked',
+    event: 'change'
+},
 ```
 
