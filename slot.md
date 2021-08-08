@@ -30,7 +30,7 @@ new Vue({
 })
 ```
 
-一、编译阶段
+## 一、编译阶段
 
 在编译生成ast节点的过程中，template字符串匹配到开始标签，调用start方法生成ast对象的过程中，会先创建ast对象，然后管理ast对象，最后管理树结构。在管理ast对象的过程中，会调用processElement方法处理标签上的属性。processElement方法中会调用processSlot方法处理与插槽相关的东西。
 
@@ -163,3 +163,143 @@ function genSlot (el: ASTElement, state: CodegenState): string {
 }
 ```
 
+最终父组件new Vue编译生成的code字符串为 `"with(this){return _c('div',[_c('child',[_c('h1',{attrs:{\"slot\":\"header\"},slot:\"header\"},[_v(_s(msg))]),_c('p',[_v(_s(msg))]),_c('p',{attrs:{\"slot\":\"footer\"},slot:\"footer\"},[_v(_s(desc))])])],1)}"`
+
+child组件生成的code字符串为 `"with(this){return _c('div',{staticClass:\"content\"},[_c('header',[_t(\"header\")],2),_c('main',[_t(\"default\",[_v(\"默认内容\")])],2),_c('footer',[_t(\"footer\")],2)])}"`
+
+## 二、运行时阶段
+
+slot插槽编译生成的代码中的_t代表renderSlot函数。renderSlot定义在core/instance/render-helpers/render-slot.js中。renderSlot里的逻辑分为两部分，一部分是作用域插槽的，一部分是普通插槽的。对于普通插槽来说，逻辑非常简单，就是拿到this.$slots中相应的插槽vnode并返回。这样，插槽slot标签就被渲染出来了。this.$slots是一个对象，key是插槽名称，值是就是组件中的相应的插槽生成的vnode对象。
+
+```JavaScript
+export function renderSlot (
+  name: string,
+  fallback: ?Array<VNode>,//fallback参数是父组件没有使用插槽时，插槽默认生成的vnode
+  //在我们的例子中就是文本 ‘默认内容’
+  props: ?Object,
+  bindObject: ?Object
+): ?Array<VNode> {
+  const scopedSlotFn = this.$scopedSlots[name]
+  let nodes
+  //作用域插槽
+  if (scopedSlotFn) { // scoped slot
+    props = props || {}
+    if (bindObject) {
+      if (process.env.NODE_ENV !== 'production' && !isObject(bindObject)) {
+        warn(
+          'slot v-bind without argument expects an Object',
+          this
+        )
+      }
+      props = extend(extend({}, bindObject), props)
+    }
+    nodes = scopedSlotFn(props) || fallback
+  } else {
+    const slotNodes = this.$slots[name]
+    // warn duplicate slot usage
+    if (slotNodes) {
+      if (process.env.NODE_ENV !== 'production' && slotNodes._rendered) {
+        warn(
+          `Duplicate presence of slot "${name}" found in the same render tree ` +
+          `- this will likely cause render errors.`,
+          this
+        )
+      }
+      slotNodes._rendered = true
+    }
+    nodes = slotNodes || fallback
+  }
+
+  const target = props && props.slot
+  if (target) {
+    return this.$createElement('template', { slot: target }, nodes)
+  } else {
+    return nodes
+  }
+}
+```
+
+组件实例上的$slots是何时生成的呢？在组件实例化调用init的时候，init函数中会执行initRender函数。
+
+```JavaScript
+function initRender (vm: Component) {
+    //占位符的context是组件的作用域或者说环境，即组件child的父组件Vue实例
+	const renderContext = parentVnode && parentVnode.context
+    vm.$slots = resolveSlots(options._renderChildren, renderContext)
+}
+```
+
+initRender函数中调用了resolveSlots函数生成了$slots。options._renderChildren就是组件的子组件vnode，本文例子中child组件的children长度为3，分别是标签为h1的vnode，p标签的vnode和拥有slot属性的p标签的vnode。在child组件被生成占位符vnode的时候，调用的是createComponent函数生成的占位符vnode，生成的占位符vnode中的children属性是一个数组，包含了标签为h1的vnode，p标签的vnode和拥有slot属性的p标签的vnode。后面child组件在初始化执行init函数的时候，init函数内调用了initInternalComponent函数，该函数中将options的 _renderChildren指向了占位符vnode上的children。
+
+```JavaScript
+export function initInternalComponent (vm: Component, options: InternalComponentOptions) {
+  //vm.constructor.options是构造器的options，在global-api文件夹里面的extend.js中有定义
+  const opts = vm.$options = Object.create(vm.constructor.options)
+  // doing this because it's faster than dynamic enumeration.
+  const parentVnode = options._parentVnode
+  opts.parent = options.parent
+  opts._parentVnode = parentVnode
+
+  const vnodeComponentOptions = parentVnode.componentOptions
+  opts.propsData = vnodeComponentOptions.propsData
+  opts._parentListeners = vnodeComponentOptions.listeners
+  opts._renderChildren = vnodeComponentOptions.children
+  opts._componentTag = vnodeComponentOptions.tag
+
+  if (options.render) {
+    opts.render = options.render
+    opts.staticRenderFns = options.staticRenderFns
+  }
+}
+```
+
+resolveSlots的定义如下。其参数context是组件实例。resolveSlots函数会遍历子节点的vnode，将vnode放置在slots这个对象的相应的key下的数组中。
+
+```Javascript
+export function resolveSlots (
+  children: ?Array<VNode>,
+  context: ?Component
+): { [key: string]: Array<VNode> } {
+  const slots = {}
+  if (!children) {
+    return slots
+  }
+  //遍历子节点渲染vnode
+  for (let i = 0, l = children.length; i < l; i++) {
+    const child = children[i]
+    const data = child.data
+    // remove slot attribute if the node is resolved as a Vue slot node
+    if (data && data.attrs && data.attrs.slot) {
+      delete data.attrs.slot
+    }
+    // named slots should only be respected if the vnode was rendered in the
+    // same context.
+    //组件vnode和组件内的插槽vnode是在同一个环境中生成的
+    //本文实例中child的占位符vnode和插槽vnode，h1和p等是在同一个环境即
+    //vue实例环境中生成的
+    if ((child.context === context || child.fnContext === context) &&
+      data && data.slot != null
+    ) {
+      //拿到子节点上的slot属性的值，作为slots对象的key
+      const name = data.slot
+      const slot = (slots[name] || (slots[name] = []))
+      if (child.tag === 'template') {
+        slot.push.apply(slot, child.children || [])
+      } else {
+        slot.push(child)
+      }
+    } else {
+      (slots.default || (slots.default = [])).push(child)
+    }
+  }
+  // ignore slots that contains only whitespace
+  for (const name in slots) {
+    if (slots[name].every(isWhitespace)) {
+      delete slots[name]
+    }
+  }
+  return slots
+}
+```
+
+因为插槽的渲染vnode都是在父组件内生成的，因此插槽内的数据访问的都是父组件内的数据。在本文的例子中，插槽的渲染vnode有3个，插槽内的数据msg等，访问的是父组件new Vue内的数据。
